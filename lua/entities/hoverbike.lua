@@ -149,6 +149,31 @@ if SERVER then
         end
     end
 
+    local function IsFreeSpace(bike,vec,ply)
+        local maxs = ply:OBBMaxs()
+        local tr = util.TraceHull({
+            start = vec,
+            endpos = vec + Vector(0,0,maxs.z or 60),
+            filter = bike,
+            mins = Vector(-maxs.y,-maxs.y,0),
+            maxs = Vector(maxs.y,maxs.y,1)
+        })
+        return not util.TraceHull(tr).Hit
+    end
+
+    local function FindSpace(bike,ply)
+        local left = bike:WorldSpaceCenter() + bike:GetForward() * bike:OBBMaxs().y
+        local right =  bike:WorldSpaceCenter() + bike:GetForward() * -bike:OBBMaxs().y
+
+        if IsFreeSpace(bike,left,ply) then
+            return left
+        elseif IsFreeSpace(bike,right,ply) then
+            return right
+        else
+            return bike:GetPos() + Vector(0,0,bike:OBBMaxs().z)
+        end
+    end
+
     local function OnLeaveVehicle(ply)
         local bike = riders[ply]
         if bike then
@@ -167,10 +192,18 @@ if SERVER then
             net.WriteEntity(bike)
             net.Send(ply)
 
-            timer.Simple(0,function() -- Small hack
+            timer.Simple(0.5,function() -- Small hack
                 if bike:IsValid() and ply:IsValid() then
                     bike:ResetBoneAngles(ply)
                 end
+            end)
+
+            timer.Simple(0,function()
+                if not bike:IsValid() or not ply:IsValid() then return end
+                ply:SetPos(FindSpace(bike,ply))
+                local ang = bike:GetAngles()
+                ang.yaw = ang.yaw - 90
+                ply:SetEyeAngles(ang)
             end)
 
             riders[ply] = nil
@@ -202,7 +235,9 @@ if SERVER then
             end
         end,
         [IN_JUMP] = function(bike,bool)
+            if not bike:IsTurnedON() then return end
             if not bool then return end
+            if CurTime() < bike.NextJump then return end
             if not bike:IsAroundFlightHeight(20) then return end
             local phys = GPO(bike)
             phys:Wake()
@@ -213,8 +248,10 @@ if SERVER then
                 phys:AddVelocity(Vector(0,0,ratio / 2))
             end
             bike:EmitSound("hoverbike/jump.wav")
+            bike.NextJump = 0.75
         end,
         [IN_ATTACK2] = function(bike,bool)
+            if not bike:IsTurnedON() then return end
             if not bool then return end
             if CurTime() < bike.NextDodge then return end
             local left = bike.Left and 1 or 0
@@ -279,6 +316,7 @@ if SERVER then
     ENT.MegaShootMult    = 5     -- Each x shot, a mega shoot will happen
     ENT.NextSCountReset  = 0     -- After how much time should we reset shoot count
     ENT.NextDodge        = 0     -- After how much time can we dodge again
+    ENT.NextJump         = 0     -- After how much time can we jump again
 
     function ENT:ApplySitBoneAngles(ply)
         if not ply:IsValid() then return end
@@ -316,11 +354,11 @@ if SERVER then
             return
         end
         self:SetNWBool("TURNED_ON",true)
-        self:SetPos(self:GetPos() + Vector(0,0,10))
+        --[[self:SetPos(self:GetPos() + Vector(0,0,10))
         local cur = self:GetAngles()
         cur.roll = 0
         cur.pitch = 0
-        self:SetAngles(cur)
+        self:SetAngles(cur)]]--
         GPO(self):Wake()
         for _,trail in pairs(self.Trails) do
             if trail:IsValid() then
@@ -452,7 +490,7 @@ if SERVER then
     end
 
     function ENT:GetFlightHeight()
-        return self.FlyHeight + ((Sin(CurTime()) + Sin(CurTime()*2+123.3)*.7 + Sin(CurTime()*3-34.13)*.5) * self.FlyInterval * .3)
+        return self.FlyHeight + ((Sin(CurTime()) + Sin(CurTime() * 2 + 123.3) * 0.7 + Sin(CurTime() * 3 - 34.13) / 2) * self.FlyInterval * 0.3)
     end
 
     function ENT:GetTraceFilter()
@@ -477,6 +515,13 @@ if SERVER then
         end
     end
 
+    local function ClampVector(vec,min,max)
+        vec.x = Clamp(vec.x,min,max)
+        vec.y = Clamp(vec.y,min,max)
+        vec.z = Clamp(vec.z,min,max)
+        return vec
+    end
+
 	function ENT:PhysicsSimulate(phys,delta)
 		local gravz = physenv.GetGravity().z
 		local torque, acceleration = Vector(0,0,0),Vector(0,0,gravz) -- Otherwise no gravity
@@ -489,7 +534,7 @@ if SERVER then
         local flightz     = self:GetFlightHeight()
 		local trfront     = TraceLine(TraceStruct(self,front,flightz * 2))
 		local trback      = TraceLine(TraceStruct(self,back,flightz * 2))
-		local trnorm      = (trfront.HitNormal or Vector(0,0,1)) * 0.5 + (trback.HitNormal or Vector(0,0,1)) * 0.5
+		local trnorm      = (trfront.HitNormal or Vector(0,0,1)) / 2 + (trback.HitNormal or Vector(0,0,1)) / 2
 		local targetz     = Max(trfront.HitPos.z,trback.HitPos.z) + flightz
 		local zforce      = self.FlightPID:Compute(pos.z - targetz,delta) * gravz
 
@@ -514,34 +559,42 @@ if SERVER then
         else
             -- Apply forward/backward force
 			local forcectrl = (self:GetRight() * self.Speed * (forward - backward) * self.TurboCoef) / delta
-			acceleration.x = forcectrl.x
-			acceleration.y = forcectrl.y
+            local reduce = Vector(0,0,0)
+
+            if (moveleft - moveright) ~= 0 then
+                local nfctrl,nvel = forcectrl:GetNormalized(),vel:GetNormalized()
+                reduce = (ClampVector(nfctrl - nvel,-0.1,0.1) * self.Speed * self.TurboCoef * 50) / delta
+            end
+
+            acceleration.x = forcectrl.x + reduce.x
+			acceleration.y = forcectrl.y + reduce.y
 		end
 
-		local up = trnorm * 1
-		up = up:LengthSqr() < 0.001 and Vector(0,0,1) or up
+        local up = trnorm * 1
+        up = up:LengthSqr() < 0.001 and Vector(0,0,1) or up
 
-		for _,stabilizer in ipairs(self.Stabilizers) do
-			local dir      = stabilizer.GetDir(self)
-			local forcedir = stabilizer.ForceDir(self)
-			local pid      = stabilizer.PID
-			local force    = up:Dot(dir)
-			force          = pid:Compute(force,delta)
+        for _,stabilizer in ipairs(self.Stabilizers) do
+            local dir      = stabilizer.GetDir(self)
+            local forcedir = stabilizer.ForceDir(self)
+            local pid      = stabilizer.PID
+            local force    = up:Dot(dir)
+            force          = pid:Compute(force,delta)
 
-			-- clamp the pid
-			-- pid.I = math.min(pid.I * (1 - delta * 3), 0.06)
+            -- clamp the pid
+            -- pid.I = math.min(pid.I * (1 - delta * 3), 0.06)
 
-			force = stabilizer.Sign * force * 3000
+            force = stabilizer.Sign * force * 3000
 
-			stabilizer.force = force
-			torque:Add(phys:WorldToLocalVector(forcedir * force))
-		end
+            stabilizer.force = force
+            torque:Add(phys:WorldToLocalVector(forcedir * force))
+        end
 
         local force_rotate = (moveleft - moveright) * ((self.Speed * 100) / 2) / self.TurboCoef
+        trnorm = not (trback.Hit or trfront.Hit) and Vector(0,0,1) or trnorm
         torque:Add(phys:WorldToLocalVector(trnorm * force_rotate))
         torque:Add(phys:WorldToLocalVector(self:GetRight() * (moveleft - moveright) * -155))
+        torque:Sub(angvel * 2)
 
-		torque:Sub(angvel * 2)
 		phys:Wake()
 		return torque,acceleration,SIM_GLOBAL_ACCELERATION
 	end
@@ -755,6 +808,10 @@ if SERVER then
     function ENT:OnRemove()
         if self:IsTurnedON() then
             self:TurnOFF()
+            local driver = self:GetDriver()
+            if driver:IsValid() then
+                self:ResetBoneAngles(driver)
+            end
             self.FlyLoop:Stop()
         end
     end
@@ -915,6 +972,22 @@ if CLIENT then
         surface.DrawTexturedRectRotated(hitpos.x,hitpos.y,50 + size,50 + size,-rot)
     end
 
+    local function FindPlayerParent(ply)
+        local ret = ply
+        if ply:IsValid() then
+            if not ply:Alive() then
+                ret = ply:GetRagdollEntity()
+            else
+                local veh = ply:GetVehicle()
+                if ply:InVehicle() then
+                    local parent = veh:GetParent()
+                    ret = parent:IsValid() and parent or veh
+                end
+            end
+        end
+        return ret
+    end
+
     -- Localplayer ent,screen width,size of the player info,rotation of the player info
     local function DrawPlayersInfo(bike,lp,sw,size,rot)
         if bike:IsHacked() then
@@ -925,7 +998,7 @@ if CLIENT then
         surface.SetMaterial(targetmat)
         for _,p in ipairs(GetPlayers()) do
             if p ~= lp then
-                local ply = p:Alive() and p or p:GetRagdollEntity()
+                local ply = FindPlayerParent(p)
                 if ply:IsValid() then
                     local tr = TraceLine({ start = lp:EyePos(), endpos = ply:WorldSpaceCenter(), filter = bike })
                     if bike:IsHacked() or tr.Hit and tr.Entity == ply then
@@ -1107,6 +1180,8 @@ if CLIENT then
                 if not cvarhud:GetBool() then return end
                 local lp = LocalPlayer()
                 if not bike:IsValid() then return end
+                local seat = lp:GetVehicle()
+                if not seat:IsValid() or seat:GetThirdPersonMode() then return end
 
                 local sw,sh = ScrW(),ScrH()
                 local time  = CurTime()

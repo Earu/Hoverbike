@@ -112,7 +112,7 @@ if SERVER then
     local cvarspeed     = CreateConVar("hoverbike_speed_mult",     "5",FCVAR_ARCHIVE,"Changes the base hoverbike speed")
     local cvarturbo     = CreateConVar("hoverbike_turbo_mult",     "2",FCVAR_ARCHIVE,"Changes the turbo hoverbike speed")
     local cvarallowhack = CreateConVar("hoverbike_allow_hack",     "1",FCVAR_ARCHIVE,"Allows admins to hack hoverbikes to gain boosts")
-    local cvarfastdl    = CreateConVar("hoverbike_fastdl",         "1",FCVAR_ARCHIVE,"Should clients download content for hoverbikes on join or not")
+    local cvarfastdl    = CreateConVar("hoverbike_fastdl",         "0",FCVAR_ARCHIVE,"Should clients download content for hoverbikes on join or not")
 
     if cvarfastdl:GetBool() then
         --AddResourceDir("models/hoverbike")
@@ -177,14 +177,10 @@ if SERVER then
     local function OnLeaveVehicle(ply)
         local bike = riders[ply]
         if bike then
-            bike.Forward   = false
-            bike.Backward  = false
-            bike.Left      = false
-            bike.Right     = false
-            bike.TurboCoef = 1
-            bike.Firing    = false
             if ply:GetInfoNum("hoverbike_auto_switch",1) ~= 0 then
                 bike:TurnOFF()
+            else
+                bike:ResetControls()
             end
 
             net.Start("HoverbikeHUD")
@@ -201,8 +197,11 @@ if SERVER then
             timer.Simple(0,function()
                 if not bike:IsValid() or not ply:IsValid() then return end
                 ply:SetPos(FindSpace(bike,ply))
-                local ang = bike:GetAngles()
-                ang.yaw = ang.yaw - 90
+                local tr = TraceLine({
+                    start = bike:WorldSpaceCenter() + bike:GetRight() * 90,
+                    endpos = bike:WorldSpaceCenter() + bike:GetRight() * 3000,
+                })
+                local ang = (tr.HitPos - ply:EyePos()):Angle()
                 ply:SetEyeAngles(ang)
             end)
 
@@ -224,7 +223,11 @@ if SERVER then
             bike.Right = bool
         end,
         [IN_SPEED] = function(bike,bool)
-            bike.TurboCoef = bool and cvarturbo:GetInt() or 1
+            if bike.FlightMode then
+                bike.Downward = bool
+            else
+                bike.TurboCoef = bool and cvarturbo:GetInt() or 1
+            end
         end,
         [IN_RELOAD] = function(bike,bool)
             if bool then return end
@@ -236,12 +239,17 @@ if SERVER then
         end,
         [IN_JUMP] = function(bike,bool)
             if not bike:IsTurnedON() then return end
+            if bike.FlightMode then
+                bike.Upward = bool
+                return
+            end
             if not bool then return end
             if CurTime() < bike.NextJump then return end
             if not bike:IsAroundFlightHeight(20) then return end
+
             local phys = GPO(bike)
             phys:Wake()
-            local ratio = (1000 / phys:GetMass()) * 1000
+            local ratio = (1000 / phys:GetMass()) * 1500
             if bike:IsHacked() then
                 phys:AddVelocity(Vector(0,0,ratio))
             else
@@ -251,22 +259,19 @@ if SERVER then
             bike.NextJump = 0.75
         end,
         [IN_ATTACK2] = function(bike,bool)
-            if not bike:IsTurnedON() then return end
-            if not bool then return end
-            if CurTime() < bike.NextDodge then return end
-            local left = bike.Left and 1 or 0
-            local right = bike.Right and 1 or 0
-            if (left - right) ~= 0 then
-                local phys = GPO(bike)
-                phys:Wake()
-                phys:AddAngleVelocity(Vector(0,150 * (left - right),0))
-                phys:AddVelocity(bike:GetForward() * (left - right) * (bike.Speed * 100) * 2)
-                bike:EmitSound("hoverbike/jump.wav",75,90)
-                bike.NextDodge = CurTime() + 1.25
-            end
+            if bool then return end
+            --[[if bike.FlightMode then
+                bike.FlightModeHeight = 0
+                bike.FlightMode = false
+            else
+                bike.FlightMode = true
+            end]]
         end,
         [IN_ATTACK] = function(bike,bool)
             bike.Firing = bool
+        end,
+        [IN_WALK] = function(bike,bool)
+            bike.Strafing = bool
         end,
     }
 
@@ -310,6 +315,8 @@ if SERVER then
     ENT.Backward         = false -- Are we going backward?
     ENT.Left             = false -- Are we going left?
     ENT.Right            = false -- Are we going right?
+    ENT.Upward           = false -- Are we going upward?
+    ENT.Downward         = false -- Are we going downward ?
     ENT.Firing           = false -- Are we firing (mouse1)?
     ENT.NextShoot        = 0     -- When are we able to shoot again(mouse1)
     ENT.ShootCount       = 0     -- The amount of bullets that have been fired
@@ -317,6 +324,9 @@ if SERVER then
     ENT.NextSCountReset  = 0     -- After how much time should we reset shoot count
     ENT.NextDodge        = 0     -- After how much time can we dodge again
     ENT.NextJump         = 0     -- After how much time can we jump again
+    ENT.Strafing         = false -- Are we strafing
+    ENT.FlightMode       = false -- Flight mode?
+    ENT.FlightModeHeight = 0     -- The current flightmode additional height
 
     function ENT:ApplySitBoneAngles(ply)
         if not ply:IsValid() then return end
@@ -347,6 +357,20 @@ if SERVER then
         end
     end
 
+    function ENT:ResetControls()
+        self.Forward          = false
+        self.Backward         = false
+        self.Upward           = false
+        self.Downward         = false
+        self.Left             = false
+        self.Right            = false
+        self.FlightMode       = false
+        self.FlightModeHeight = 0
+        self.TurboCoef        = 1
+        self.Firing           = false
+        self.ShootCount       = 0
+    end
+
     function ENT:TurnON()
         if self:IsTurnedON() then return end
         if self:WaterLevel() > 0 then
@@ -354,11 +378,6 @@ if SERVER then
             return
         end
         self:SetNWBool("TURNED_ON",true)
-        --[[self:SetPos(self:GetPos() + Vector(0,0,10))
-        local cur = self:GetAngles()
-        cur.roll = 0
-        cur.pitch = 0
-        self:SetAngles(cur)]]--
         GPO(self):Wake()
         for _,trail in pairs(self.Trails) do
             if trail:IsValid() then
@@ -368,6 +387,9 @@ if SERVER then
         self.FlyLoop = CreateSound(self,"npc/scanner/cbot_fly_loop.wav")
         self.FlyLoop:Play()
         self:EmitSound("ambient/machines/thumper_startup1.wav")
+        self.FlightPID:Reset()
+        self.RollPID:Reset()
+        self.PitchPID:Reset()
     end
 
     function ENT:TurnOFF()
@@ -380,10 +402,7 @@ if SERVER then
         end
         self.FlyLoop:FadeOut(1)
         self:EmitSound("ambient/machines/thumper_shutdown1.wav")
-        self.FlightPID:Reset()
-        self.RollPID:Reset()
-        self.PitchPID:Reset()
-        self.ShootCount = 0
+        self:ResetControls()
     end
 
     function ENT:HeatUp(increase)
@@ -457,9 +476,9 @@ if SERVER then
             phys:Wake()
         end
 
-        self.FlightPID = PID(0.5,0,0.02)  -- PID controller for the flight height
-        self.PitchPID  = PID(0.84,0,0.02) -- PID controller for laying on sides while turning
-        self.RollPID   = PID(0.84,0,0.02) -- PID controller for setting angle according to world geometry
+        self.FlightPID = PID(0.5,0,0.04)  -- PID controller for the flight height
+        self.PitchPID  = PID(0.84,1,0.12) -- PID controller for laying on sides while turning
+        self.RollPID   = PID(0.84,1,0.12) -- PID controller for setting angle according to world geometry
 		self.Stabilizers = {
 			{ PID = self.PitchPID, GetDir = self.GetForward, ForceDir = self.GetRight,   Sign = -1 },
 			{ PID = self.RollPID,  GetDir = self.GetRight  , ForceDir = self.GetForward, Sign = 1  },
@@ -490,7 +509,8 @@ if SERVER then
     end
 
     function ENT:GetFlightHeight()
-        return self.FlyHeight + ((Sin(CurTime()) + Sin(CurTime() * 2 + 123.3) * 0.7 + Sin(CurTime() * 3 - 34.13) / 2) * self.FlyInterval * 0.3)
+        local time = CurTime()
+        return self.FlyHeight + ((Sin(time) + Sin(time * 2 + 123.3) * 0.7 + Sin(time * 3 - 34.13) / 2) * self.FlyInterval * 0.3)
     end
 
     function ENT:GetTraceFilter()
@@ -523,24 +543,33 @@ if SERVER then
     end
 
 	function ENT:PhysicsSimulate(phys,delta)
+        if self.FlightMode then
+            if self.Upward then
+                self.FlightModeHeight = self.FlightModeHeight + (1 / delta)
+            end
+            if self.Downward then
+                self.FlightModeHeight = self.FlightModeHeight - (1 / delta)
+            end
+        end
+
 		local gravz = physenv.GetGravity().z
 		local torque, acceleration = Vector(0,0,0),Vector(0,0,gravz) -- Otherwise no gravity
 		if not self:IsTurnedON() then return torque,acceleration,SIM_NOTHING end
 		local dampfactor  = 1.00001 -- Do NOT touch this
 		local ang         = self:GetAngles()
-		local vel, angvel = phys:GetVelocity(),phys:GetAngleVelocity()
-		local pos, offset = self:WorldSpaceCenter(),self:GetRight() * 15 -- Right is the actual forward
-        local front, back = pos + offset,pos - offset
+		local vel,angvel  = phys:GetVelocity(),phys:GetAngleVelocity()
+		local pos,offset  = self:WorldSpaceCenter(),self:GetRight() * 15 -- Right is the actual forward
+        local front,back  = pos + offset,pos - offset
         local flightz     = self:GetFlightHeight()
 		local trfront     = TraceLine(TraceStruct(self,front,flightz * 2))
 		local trback      = TraceLine(TraceStruct(self,back,flightz * 2))
 		local trnorm      = (trfront.HitNormal or Vector(0,0,1)) / 2 + (trback.HitNormal or Vector(0,0,1)) / 2
-		local targetz     = Max(trfront.HitPos.z,trback.HitPos.z) + flightz
+		local targetz     = Max(trfront.HitPos.z,trback.HitPos.z) + flightz + self.FlightModeHeight
 		local zforce      = self.FlightPID:Compute(pos.z - targetz,delta) * gravz
 
 		-- This is for jumps mostly
-		if pos.z - targetz > 0 then
-			acceleration.z = gravz / 5 -- We dont want the actual gravity, too strong
+		if not self.FlightMode and pos.z - targetz > 0 then
+			acceleration.z = gravz  -- We dont want the actual gravity, too strong
         else
             -- Force necessary to hover
 			acceleration.z = zforce
@@ -551,7 +580,7 @@ if SERVER then
 		local moveleft  = self.Left     and 1 or 0
 		local moveright = self.Right    and 1 or 0
 
-		if (forward - backward) == 0 then
+		if (forward - backward) == 0 and not self.Strafing then
 			-- Velocity decay if no backward or forward key pressed
 			local decay = -vel * 2 / dampfactor
 			acceleration.x = decay.x
@@ -562,8 +591,13 @@ if SERVER then
             local reduce = Vector(0,0,0)
 
             if (moveleft - moveright) ~= 0 then
-                local nfctrl,nvel = forcectrl:GetNormalized(),vel:GetNormalized()
-                reduce = (ClampVector(nfctrl - nvel,-0.1,0.1) * self.Speed * self.TurboCoef * 50) / delta
+                if not self.Strafing then
+                    local nfctrl,nvel = forcectrl:GetNormalized(),vel:GetNormalized()
+                    reduce = (ClampVector(nfctrl - nvel,-0.1,0.1) * self.Speed * self.TurboCoef * 50) / delta
+                else
+                    local straforce = (self:GetForward() * (self.Speed * 2) * (moveleft - moveright) * self.TurboCoef) / delta
+                    forcectrl = forcectrl + straforce
+                end
             end
 
             acceleration.x = forcectrl.x + reduce.x
@@ -589,10 +623,15 @@ if SERVER then
             torque:Add(phys:WorldToLocalVector(forcedir * force))
         end
 
-        local force_rotate = (moveleft - moveright) * ((self.Speed * 100) / 2) / self.TurboCoef
+
         trnorm = not (trback.Hit or trfront.Hit) and Vector(0,0,1) or trnorm
-        torque:Add(phys:WorldToLocalVector(trnorm * force_rotate))
-        torque:Add(phys:WorldToLocalVector(self:GetRight() * (moveleft - moveright) * -155))
+
+        if not self.Strafing then
+            local force_rotate = (moveleft - moveright) * ((self.Speed * 100) / 2) / self.TurboCoef
+            torque:Add(phys:WorldToLocalVector(trnorm * force_rotate))
+            torque:Add(phys:WorldToLocalVector(self:GetRight() * (moveleft - moveright) * -155))
+        end
+
         torque:Sub(angvel * 2)
 
 		phys:Wake()
@@ -647,8 +686,9 @@ if SERVER then
         core.Inflictor = self
         core.TraceFilter = self:GetTraceFilter()
         core:SetHacked(self:IsHacked())
-        GPO(core):Wake()
-        GPO(core):SetVelocity(self:GetRight() * 10000)
+        local phys = GPO(core)
+        phys:Wake()
+        phys:SetVelocity(phys:GetVelocity() + self:GetRight() * 10000)
     end
 
     function ENT:FireLasers()
@@ -660,7 +700,12 @@ if SERVER then
         if CurTime() < self.NextShoot then return end
         local pos    = self:GetPos() + self:GetUp() * 23 + self:GetRight() * 40
         local offset = self:GetForward() * 30
-        if self:IsHacked() or (not self:IsHacked() and self.ShootCount > 0 and self.ShootCount % self.MegaShootMult == 0) then
+        local driver = self:GetDriver()
+        local hascores = true
+        if driver:IsValid() then
+            hascores = driver:GetInfoNum("hoverbike_mega_shots",1) == 1
+        end
+        if (self:IsHacked() and hascores) or (not self:IsHacked() and hascores and self.ShootCount > 0 and self.ShootCount % self.MegaShootMult == 0) then
             self:EmitSound("hoverbike/shoot.wav",100,50)
             self:HeatUp(20)
             self:FireCore(offset)
@@ -685,6 +730,7 @@ if SERVER then
                 end
                 self:CoolDown(5)
             end
+
             self.FlyLoop:ChangePitch(75 + Clamp(self:GetKmpH(),0,75))
         else
             self:CoolDown(5)
@@ -839,7 +885,9 @@ end
 if CLIENT then
     language.Add("hoverbike","Hoverbike")
 
-    local cvarauto  = CreateClientConVar("hoverbike_auto_switch","1",true,true,"Enabled, this automatically turns ON and OFF hoverbikes for you")
+    CreateClientConVar("hoverbike_auto_switch","1",true,true,"Enabled, this automatically turns ON and OFF hoverbikes for you")
+    CreateClientConVar("hoverbike_mega_shots","1",true,true,"Enables or disables mega shots")
+
     local cvarlight = CreateClientConVar("hoverbike_lights","1",true,false,"Disabling this may improve FPS on some maps")
     local cvarhud   = CreateClientConVar("hoverbike_hud","1",true,false,"Disabling this may improve your FPS while riding an hoverbike")
 

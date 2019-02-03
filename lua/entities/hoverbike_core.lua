@@ -113,7 +113,7 @@ if SERVER then
 				dmginfo:SetDamageForce(self:GetVelocity():GetNormalized() * 2500)
 
 				util.BlastDamageInfo(dmginfo,self:GetPos(),radius)
-				--self:EmitSound("^hoverbike/coreimpact.wav",100,200)
+				self:EmitSound("hoverbike/explosion.wav",100,150)
 			end
 			self:Remove()
 		end

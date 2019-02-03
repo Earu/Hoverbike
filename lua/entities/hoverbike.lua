@@ -188,7 +188,7 @@ if SERVER then
             net.WriteEntity(bike)
             net.Send(ply)
 
-            timer.Simple(0.5,function() -- Small hack
+            timer.Simple(0,function() -- Small hack
                 if bike:IsValid() and ply:IsValid() then
                     bike:ResetBoneAngles(ply)
                 end
@@ -255,7 +255,7 @@ if SERVER then
             else
                 phys:AddVelocity(Vector(0,0,ratio / 2))
             end
-            bike:EmitSound("hoverbike/jump.wav")
+            bike:EmitSound("^hoverbike/jump.wav",100)
             bike.NextJump = 0.75
         end,
         [IN_ATTACK2] = function(bike,bool)
@@ -374,7 +374,7 @@ if SERVER then
     function ENT:TurnON()
         if self:IsTurnedON() then return end
         if self:WaterLevel() > 0 then
-            self:EmitSound("hoverbike/shutdown.wav")
+            self:EmitSound("^hoverbike/turnoff.wav",100)
             return
         end
         self:SetNWBool("TURNED_ON",true)
@@ -384,9 +384,9 @@ if SERVER then
                 trail:SetDrawVisible(true)
             end
         end
-        self.FlyLoop = CreateSound(self,"npc/scanner/cbot_fly_loop.wav")
+        self.FlyLoop = CreateSound(self,"hoverbike/baseloop.wav")
         self.FlyLoop:Play()
-        self:EmitSound("ambient/machines/thumper_startup1.wav")
+        self:EmitSound("^hoverbike/turnon.wav",100)
         self.FlightPID:Reset()
         self.RollPID:Reset()
         self.PitchPID:Reset()
@@ -400,8 +400,8 @@ if SERVER then
                 trail:SetDrawVisible(false)
             end
         end
-        self.FlyLoop:FadeOut(1)
-        self:EmitSound("ambient/machines/thumper_shutdown1.wav")
+        self.FlyLoop:Stop()
+        self:EmitSound("^hoverbike/turnoff.wav",100)
         self:ResetControls()
     end
 
@@ -731,7 +731,14 @@ if SERVER then
                 self:CoolDown(5)
             end
 
-            self.FlyLoop:ChangePitch(75 + Clamp(self:GetKmpH(),0,75))
+            local kmh = self:GetKmpH()
+            if kmh <= 10 then
+                self.FlyLoop:ChangeVolume(10)
+                self.FlyLoop:ChangePitch(50)
+            else
+                self.FlyLoop:ChangeVolume(150)
+                self.FlyLoop:ChangePitch(75 + Clamp(kmh,0,75))
+            end
         else
             self:CoolDown(5)
         end
@@ -1255,10 +1262,12 @@ if CLIENT then
                 if not cvarhud:GetBool() then return end
                 if hide[name] then return false end
             end)
+            surface.PlaySound("hoverbike/mount.wav")
         else
             hook.Remove("HUDPaint","Hoverbike")
             hook.Remove("HUDDrawTargetID","Hoverbike")
             hook.Remove("HUDShouldDraw","Hoverbike")
+            surface.PlaySound("hoverbike/dismount.wav")
         end
     end)
 

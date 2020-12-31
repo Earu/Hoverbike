@@ -649,6 +649,7 @@ if SERVER then
         "physics/metal/metal_solid_impact_hard5.wav",
     }
     function ENT:PhysicsCollide(data,collider)
+	if not IsValid(data.HitEntity) then return end
         local vel = self:IsTurnedON() and data.OurOldVelocity:Length2D() or data.OurOldVelocity:Length()
         if data.HitEntity.GetHoverbike and data.HitEntity:GetHoverbike() == self then return end
         if vel >= 200 then

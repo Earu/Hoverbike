@@ -1,0 +1,23 @@
+name: Workshop
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  workshop-publish:
+    runs-on: ubuntu-latest
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      # Creates a GMA and publishes it to the Steam Workshop
+      - name: Publish to Steam Workshop
+        uses: Earu/GSW-action@V2.1
+        with:
+          account-name: ${{secrets.STEAM_NAME}}
+          account-password: ${{secrets.STEAM_PASSWORD}}
+          workshop-id: '1442804147'
+          addon-path: ${{env.GITHUB_WORKSPACE}}
